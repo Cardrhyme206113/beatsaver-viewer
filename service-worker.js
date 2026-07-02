@@ -1,1 +1,1 @@
-importScripts('./simbers-sw.js');
+importScripts('./simbers-sw.js?v=2');
