@@ -1,0 +1,90 @@
+name: Build Simplified Sabers viewer
+
+on:
+  push:
+    paths:
+      - .github/trigger-simbers-viewer-integration.txt
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: source
+          fetch-depth: 1
+
+      - name: Checkout GitHub Pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Apply integration patch
+        working-directory: source
+        run: python .github/scripts/integrate_simbers_viewer.py
+
+      - name: Install dependencies
+        working-directory: source
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Build production viewer
+        working-directory: source
+        env:
+          NODE_OPTIONS: --openssl-legacy-provider
+        run: npm run build
+
+      - name: Validate build
+        shell: bash
+        run: |
+          test -s source/index.html
+          test -s source/build/build.js
+          grep -q 'SIMPLIFIED_SABERS_LOAD_MAP' source/build/build.js
+          grep -q 'high-resolution-renderer' source/index.html
+          grep -q 'simbers-bridge' source/index.html
+          ! grep -q 'CLICK ANYWHERE TO PLAY' source/index.html
+          ! grep -q 'id="logo"' source/index.html
+          grep -q '90Degree' source/index.html
+          grep -q '360Degree' source/index.html
+
+      - name: Commit source changes
+        shell: bash
+        run: |
+          cd source
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/trigger-simbers-viewer-integration.txt
+          git rm -f .github/scripts/integrate_simbers_viewer.py
+          git rm -f .github/workflows/run-simbers-viewer-integration.yml
+          git rm -f .github/workflows/audit-viewer-integration.yml || true
+          git rm -f viewer-integration-audit.txt || true
+          git add src
+          git commit -m "Integrate lightweight viewer with Simplified Sabers"
+          git push origin HEAD:master
+
+      - name: Update GitHub Pages build
+        shell: bash
+        run: |
+          cp source/index.html pages/index.html
+          mkdir -p pages/build
+          cp source/build/build.js pages/build/build.js
+          touch pages/.nojekyll
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html build/build.js .nojekyll
+          git commit -m "Deploy Simplified Sabers lightweight viewer"
+          git push origin HEAD:gh-pages
