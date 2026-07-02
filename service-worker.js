@@ -1,0 +1,1 @@
+importScripts('./simbers-sw.js');
