@@ -1,0 +1,38 @@
+name: Fix deployed viewer
+
+on:
+  push:
+    paths:
+      - .github/fix-pages-viewer.txt
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+      - name: Patch page
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('index.html')
+          s=p.read_text(encoding='utf-8')
+          if 'data-mode="90Degree"' not in s:
+            s=s.replace('<li data-mode="OneSaber">OneSaber</li>','<li data-mode="OneSaber">OneSaber</li>\n<li data-mode="90Degree">90Degree</li>\n<li data-mode="360Degree">360Degree</li>',1)
+          s=s.replace('CLICK ANYWHERE TO PLAY','')
+          s += '\n<style>#logo,.github-corner,#loadingGestureButton,#search,#subscribeForm{display:none!important}</style>\n'
+          p.write_text(s,encoding='utf-8')
+          PY
+      - name: Commit page
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Add generated map characteristics to viewer"
+          git push origin HEAD:gh-pages
