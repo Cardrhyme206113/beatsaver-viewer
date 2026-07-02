@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Simplified Sabers 3D Viewer</title>
+  <style>
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#050508}
+    #viewer{position:fixed;inset:0;width:100%;height:100%;border:0;background:#050508}
+    #wait{position:fixed;inset:0;display:grid;place-items:center;background:#050508;color:#9297a3;font:700 12px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.12em;text-transform:uppercase;text-align:center;z-index:2}
+    #wait.hidden{display:none}
+    #wait small{display:block;margin-top:8px;color:#555b66;font-size:10px;letter-spacing:.05em;text-transform:none}
+  </style>
+</head>
+<body>
+  <iframe id="viewer" title="Simplified Sabers 3D preview" allow="autoplay; fullscreen" allowfullscreen></iframe>
+  <div id="wait"><div>Waiting for generated map…<small>The map stays on this device.</small></div></div>
+
+  <script>
+  (()=>{
+    'use strict';
+
+    const CACHE_NAME='simplified-sabers-light-viewer-v1';
+    const params=new URLSearchParams(location.search);
+    const bridgeMode=params.get('bridge')==='1';
+    const frame=document.getElementById('viewer');
+    const wait=document.getElementById('wait');
+    let requestedMode=params.get('mode')||'Standard';
+    let requestedDifficulty=params.get('difficulty')||'ExpertPlus';
+    let mapStarted=false;
+
+    function post(type,extra={}){
+      if(window.parent===window)return;
+      window.parent.postMessage({type,...extra},'*');
+    }
+
+    async function registerWorker(){
+      if(!('serviceWorker' in navigator))throw new Error('Service workers are unavailable.');
+      await navigator.serviceWorker.register('./service-worker.js',{scope:'./'});
+      await navigator.serviceWorker.ready;
+    }
+
+    async function cacheMap(arrayBuffer){
+      if(!(arrayBuffer instanceof ArrayBuffer)||arrayBuffer.byteLength<32){
+        throw new Error('Generated map payload is invalid.');
+      }
+      const token=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const mapUrl=new URL('./generated-map.zip',location.href);
+      mapUrl.searchParams.set('v',token);
+      const cache=await caches.open(CACHE_NAME);
+      const old=await cache.keys();
+      await Promise.all(old.map(request=>cache.delete(request)));
+      await cache.put(mapUrl.href,new Response(arrayBuffer,{
+        status:200,
+        headers:{
+          'Content-Type':'application/zip',
+          'Content-Length':String(arrayBuffer.byteLength),
+          'Cache-Control':'no-store'
+        }
+      }));
+      return mapUrl.href;
+    }
+
+    function launchViewer(mapUrl){
+      mapStarted=false;
+      const childUrl=new URL('./index.html',location.href);
+      childUrl.searchParams.set('zip',mapUrl);
+      childUrl.searchParams.set('mode',requestedMode);
+      childUrl.searchParams.set('difficulty',requestedDifficulty);
+      childUrl.searchParams.set('simbers','1');
+      childUrl.searchParams.set('v',Date.now());
+      frame.src=childUrl.href;
+      wait.classList.add('hidden');
+    }
+
+    function hideBranding(doc){
+      const style=doc.createElement('style');
+      style.textContent=`
+        #logo,.github-corner,#loadingGestureButton,#search,#subscribeForm{display:none!important}
+        #controls{max-width:calc(100vw - 12px)!important;width:760px!important;margin-bottom:6px!important;border-radius:5px!important;background:rgba(4,4,7,.88)!important;border:1px solid rgba(255,255,255,.12)!important;box-sizing:border-box!important}
+        @media(max-width:720px){#controls{width:calc(100vw - 10px)!important;flex-wrap:wrap!important;gap:5px!important;justify-content:center!important;padding:7px!important}#timeline{flex:1 1 110px!important;min-width:80px!important}#songInfoContainer{flex:1 1 100%!important}#songInfoSelect{position:static!important;margin-left:auto!important}}
+      `;
+      doc.head.appendChild(style);
+
+      const stageLogo=doc.querySelector('a-entity#logo');
+      if(stageLogo)stageLogo.remove();
+      const controlLogo=doc.querySelector('#controls>a#logo');
+      if(controlLogo)controlLogo.remove();
+      const corner=doc.querySelector('.github-corner');
+      if(corner)corner.remove();
+      const gesture=doc.getElementById('loadingGestureButton');
+      if(gesture)gesture.remove();
+      const search=doc.getElementById('search');
+      if(search)search.remove();
+      const subscribe=doc.getElementById('subscribeForm');
+      if(subscribe)subscribe.remove();
+    }
+
+    function addModeOption(doc,mode){
+      const list=doc.getElementById('controlsModes');
+      if(!list||list.querySelector(`[data-mode="${mode}"]`))return;
+      const option=doc.createElement('li');
+      option.dataset.mode=mode;
+      option.textContent=mode;
+      list.appendChild(option);
+    }
+
+    function patchControls(scene,doc){
+      const component=scene.components&&scene.components['song-controls'];
+      if(!component)return;
+
+      component.updateModeOptions=function(){
+        const list=this.modeOptionEls||doc.getElementById('controlsModes');
+        if(!list||!this.beatmaps)return;
+        list.textContent='';
+        Object.keys(this.beatmaps).forEach(mode=>{
+          if(!this.beatmaps[mode]||!Object.keys(this.beatmaps[mode]).length)return;
+          const option=doc.createElement('li');
+          option.dataset.mode=mode;
+          option.textContent=mode;
+          list.appendChild(option);
+        });
+      };
+
+      component.updateDifficultyOptions=function(){
+        const list=this.difficultyOptions||doc.getElementById('controlsDifficultyOptions');
+        const diffs=this.difficulties&&this.difficulties[this.data.mode]||[];
+        if(!list)return;
+        list.textContent='';
+        diffs.forEach(diff=>{
+          const option=doc.createElement('li');
+          option.dataset.difficulty=diff._difficulty;
+          option.textContent=diff._customData&&diff._customData._difficultyLabel||diff._difficulty;
+          list.appendChild(option);
+        });
+      };
+    }
+
+    function patchRotation(scene,doc){
+      const generator=scene.components&&scene.components['beat-generator'];
+      if(!generator||generator.__simbersRotationPatched)return;
+      generator.__simbersRotationPatched=true;
+      generator.__simbersRotation=0;
+      const original=generator.generateEvent.bind(generator);
+      generator.generateEvent=function(event){
+        original(event);
+        if(event._type!==14&&event._type!==15)return;
+        const delta={2:-30,3:-15,4:15,5:30}[event._value];
+        if(!delta)return;
+        this.__simbersRotation+=delta;
+        const radians=THREE.Math.degToRad(-this.__simbersRotation);
+        const stage=doc.getElementById('stage');
+        const beats=doc.getElementById('beatContainer');
+        if(stage)stage.object3D.rotation.y=radians;
+        if(beats)beats.object3D.rotation.y=radians;
+      };
+    }
+
+    function setHighResolution(scene){
+      const apply=()=>{
+        const renderer=scene.renderer;
+        if(!renderer)return;
+        const ratio=Math.min(3,Math.max(1,(frame.contentWindow.devicePixelRatio||1)*1.25));
+        renderer.setPixelRatio(ratio);
+        renderer.setSize(frame.clientWidth||innerWidth,frame.clientHeight||innerHeight,false);
+      };
+      if(scene.hasLoaded)requestAnimationFrame(apply);
+      scene.addEventListener('renderstart',apply,{once:true});
+      frame.contentWindow.addEventListener('resize',()=>requestAnimationFrame(apply));
+    }
+
+    function unlockAudio(scene,doc){
+      scene.emit('usergesturereceive',null,false);
+      const analyserEl=doc.getElementById('audioAnalyser');
+      const analyser=analyserEl&&analyserEl.components&&analyserEl.components.audioanalyser;
+      if(analyser&&analyser.resumeContext){
+        Promise.resolve(analyser.resumeContext()).catch(()=>{});
+      }
+    }
+
+    function customizeChild(){
+      let childWindow,doc;
+      try{
+        childWindow=frame.contentWindow;
+        doc=childWindow.document;
+      }catch(error){
+        post('SIMPLIFIED_ARCVIEWER_ERROR',{message:'Viewer frame could not be customized.'});
+        return;
+      }
+      hideBranding(doc);
+      addModeOption(doc,'90Degree');
+      addModeOption(doc,'360Degree');
+
+      const scene=doc.querySelector('a-scene');
+      if(!scene)return;
+
+      const setup=()=>{
+        hideBranding(doc);
+        addModeOption(doc,'90Degree');
+        addModeOption(doc,'360Degree');
+        patchControls(scene,doc);
+        patchRotation(scene,doc);
+        setHighResolution(scene);
+        unlockAudio(scene,doc);
+
+        const unlock=()=>unlockAudio(scene,doc);
+        doc.addEventListener('pointerdown',unlock,{passive:true});
+        doc.addEventListener('touchstart',unlock,{passive:true});
+        doc.addEventListener('keydown',unlock);
+
+        scene.addEventListener('challengeloadend',event=>{
+          const detail=event.detail||{};
+          const modes=Object.keys(detail.beatmaps||{});
+          modes.forEach(mode=>addModeOption(doc,mode));
+
+          setTimeout(()=>{
+            if(requestedMode&&detail.beatmaps&&detail.beatmaps[requestedMode]){
+              scene.emit('modeselect',requestedMode,false);
+            }
+            if(requestedDifficulty&&detail.beatmaps&&detail.beatmaps[requestedMode]&&detail.beatmaps[requestedMode][requestedDifficulty]){
+              scene.emit('difficultyselect',requestedDifficulty,false);
+            }
+            unlockAudio(scene,doc);
+            const loading=doc.getElementById('loadingSongInfoContainer');
+            if(loading)loading.setAttribute('visible','false');
+            if(!mapStarted){
+              mapStarted=true;
+              post('SIMPLIFIED_ARCVIEWER_STARTED',{modes,mode:requestedMode,difficulty:requestedDifficulty});
+            }
+          },0);
+        });
+      };
+
+      if(scene.hasLoaded)setup();
+      else scene.addEventListener('loaded',setup,{once:true});
+    }
+
+    frame.addEventListener('load',customizeChild);
+
+    window.addEventListener('message',async event=>{
+      if(event.source!==window.parent)return;
+      const data=event.data||{};
+      if(data.type!=='SIMPLIFIED_SABERS_LOAD_MAP')return;
+      try{
+        requestedMode=data.mode||'Standard';
+        requestedDifficulty=data.difficulty||'ExpertPlus';
+        const mapUrl=await cacheMap(data.bytes);
+        post('SIMPLIFIED_ARCVIEWER_MAP_ACCEPTED');
+        launchViewer(mapUrl);
+      }catch(error){
+        console.error(error);
+        post('SIMPLIFIED_ARCVIEWER_ERROR',{message:error.message||String(error)});
+      }
+    });
+
+    if(bridgeMode){
+      registerWorker().then(()=>post('SIMPLIFIED_ARCVIEWER_READY')).catch(error=>{
+        console.error(error);
+        post('SIMPLIFIED_ARCVIEWER_ERROR',{message:error.message||String(error)});
+      });
+    }else{
+      const zip=params.get('zip');
+      if(zip){launchViewer(zip);}
+      else{
+        wait.innerHTML='<div>No map supplied.<small>Open this viewer from Simplified Sabers.</small></div>';
+      }
+    }
+  })();
+  </script>
+</body>
+</html>
